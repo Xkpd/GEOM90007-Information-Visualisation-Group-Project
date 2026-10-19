@@ -5,7 +5,7 @@ Unstyled starting point. Fork it and explore styles on your own branch.
 ## Run
 
 ```sh
-Rscript R/prep_places.R      # only if data/processed/places.csv is missing; downloads raw data to data/raw/
+Rscript scripts/prep_places.R      # only if data/processed/places.csv is missing; downloads raw data to data/raw/
 Rscript -e 'shiny::runApp()'
 ```
 
