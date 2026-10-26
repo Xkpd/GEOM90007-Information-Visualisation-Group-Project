@@ -11,15 +11,16 @@ h3 { font-family: "Press Start 2P", monospace; font-size: 12px; color: var(--gol
 
 .grid { display: grid; grid-template-columns: 250px 1fr 300px; gap: 16px; height: calc(100vh - 90px); }
 .panel { background: #000; border: 4px solid var(--paper); box-shadow: 6px 6px 0 #000; padding: 4px 12px; overflow-y: auto; }
-#map { border: 4px solid var(--paper); box-shadow: 6px 6px 0 #000; background: var(--sky); }
+.mapwrap { border: 4px solid var(--paper); box-shadow: 6px 6px 0 #000; }
 
-/* pixelated map */
-.leaflet-tile { image-rendering: pixelated; }
-.leaflet-container svg path { shape-rendering: crispEdges; }
-.leaflet-marker-icon { image-rendering: pixelated; }
-.area-label { font-family: "Press Start 2P", monospace; font-size: 9px; color: var(--ink) !important;
-  text-shadow: 1px 1px 0 var(--paper), -1px -1px 0 var(--paper), 1px -1px 0 var(--paper), -1px 1px 0 var(--paper); }
-.leaflet-tooltip { font-family: "VT323", monospace; font-size: 18px; border-radius: 0; border: 3px solid var(--ink); box-shadow: 3px 3px 0 #000; }
+/* map stays clean */
+.mapwrap { position: relative; }
+.leaflet-tooltip { font-family: "VT323", monospace; font-size: 19px; line-height: 1.05; color: var(--ink);
+  border-radius: 0; border: 3px solid var(--ink); box-shadow: 4px 4px 0 rgba(0,0,0,.6); padding: 6px 8px; }
+.leaflet-tooltip::before { display: none; }
+.focusbar { position: absolute; top: 10px; left: 56px; z-index: 1000; background: var(--gold); color: #000;
+  border: 3px solid #000; box-shadow: 4px 4px 0 #000; padding: 4px 10px; font-size: 20px; }
+.focusbar a { color: #000; margin-left: 12px; text-decoration: underline; }
 
 /* legend */
 .lg { display: flex; align-items: center; gap: 8px; line-height: 1.3; }
@@ -28,9 +29,18 @@ h3 { font-family: "Press Start 2P", monospace; font-size: 12px; color: var(--gol
 .hint { color: var(--grey); font-size: 17px; line-height: 1.1; }
 input[type="checkbox"] { accent-color: var(--gold); }
 
+.dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--paper);
+  margin: 0 6px 0 2px; vertical-align: -1px; background: var(--paper); }
+.dot.hollow { background: transparent; }
+.dash { display: inline-block; width: 22px; border-top: 3px dashed var(--paper); margin: 0 6px 0 12px; vertical-align: 4px; }
+.key { color: var(--grey); font-size: 17px; margin-bottom: 6px; }
+
 /* achievements */
 .ach { border: 3px solid #5f574f; padding: 6px 8px; margin-bottom: 8px; color: #5f574f; }
 .ach.done { border-color: var(--gold); color: var(--paper); background: #2a1f00; }
+.ach.clickable { cursor: pointer; }
+.ach.clickable:hover { border-color: var(--paper); }
+.ach.focused { outline: 3px dashed var(--gold); outline-offset: 2px; }
 .ach-t { font-family: "Press Start 2P", monospace; font-size: 10px; }
 .ach.done .ach-t { color: var(--gold); }
 .ach-d { font-size: 17px; line-height: 1.1; margin: 4px 0; }
@@ -43,9 +53,33 @@ input[type="checkbox"] { accent-color: var(--gold); }
   box-shadow: 3px 3px 0 #000; color: #000; }
 .btn { background: var(--grey); margin: 8px 0 12px; }
 .lv-btn { display: block; width: 100%; margin: 6px 0; padding: 10px; text-align: left; }
+.lv-btn.current { outline: 3px dashed #000; outline-offset: 2px; }
+.modal-stats { font-size: 20px; margin-bottom: 10px; }
 .lv-btn:hover, .btn:hover { transform: translate(2px, 2px); box-shadow: 1px 1px 0 #000; }
 .modal-content { border-radius: 0; border: 4px solid #000; background: var(--paper); color: var(--ink); }
 .modal-title { font-family: "Press Start 2P", monospace; font-size: 14px; }
 .shiny-notification { font-family: "Press Start 2P", monospace; font-size: 11px; border-radius: 0;
   border: 4px solid #000; box-shadow: 4px 4px 0 #000; opacity: 1; background: var(--paper); color: var(--ink); }
 .shiny-notification-warning { background: var(--gold); }
+
+/* clusters */
+.pt-cluster div { width: 100%; height: 100%; border-radius: 50%; border: 4px solid; background: rgba(255,255,255,.92);
+  display: flex; align-items: center; justify-content: center; position: relative;
+  font-family: "VT323", monospace; font-size: 20px; color: var(--ink); box-shadow: 2px 2px 0 rgba(0,0,0,.45); }
+.pt-cluster i { position: absolute; top: -10px; right: -14px; font-style: normal; font-size: 15px; color: #fff;
+  padding: 0 3px; border: 2px solid var(--ink); }
+
+/* collapsible achievements panel */
+.grid { transition: grid-template-columns .2s; }
+.grid.ach-collapsed { grid-template-columns: 250px 1fr 56px; }
+.ach-panel { position: relative; }
+.collapse-btn { position: absolute; top: 8px; right: 8px; width: 28px; height: 28px; padding: 0;
+  background: var(--grey); border: 3px solid #000; box-shadow: 2px 2px 0 #000; font-family: "Press Start 2P", monospace; font-size: 10px; }
+.collapse-btn::before { content: "▶"; }
+.ach-collapsed .collapse-btn { right: 50%; transform: translateX(50%); }
+.ach-collapsed .collapse-btn::before { content: "◀"; }
+.ach-mini { display: none; }
+.ach-collapsed .ach-panel { padding: 44px 0 0; overflow: hidden; }
+.ach-collapsed .ach-panel h3, .ach-collapsed #ach { display: none; }
+.ach-collapsed .ach-mini { display: block; writing-mode: vertical-rl; margin: 8px auto; color: var(--gold);
+  font-family: "Press Start 2P", monospace; font-size: 11px; }

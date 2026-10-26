@@ -1,4 +1,4 @@
-# Offline: download open data -> data/processed/{places.csv, areas_pixel.geojson, ftz.geojson}
+# Offline: download open data -> data/processed/{places.csv, areas.geojson, ftz.geojson}
 # Run from repo root: Rscript scripts/prep_places.R
 library(sf)
 
@@ -75,14 +75,7 @@ pts$rare <- pts$category == "Food" & !pts$sub %in% common
 pts$id <- seq_len(nrow(pts))
 write.csv(st_drop_geometry(pts), "data/processed/places.csv", row.names = FALSE)
 
-# Pixelated small areas: 120 m web-mercator grid, each cell goes to the area holding its centre
-a3857 <- st_transform(areas, 3857)
-grid <- st_sf(geometry = st_make_grid(a3857, cellsize = 150))
-grid$area <- st_join(st_sf(geometry = st_centroid(grid$geometry)), a3857)$area
-grid <- grid[!is.na(grid$area), ]
-px <- aggregate(grid["area"], list(name = grid$area), \(x) x[1])
-px <- st_transform(px["name"], 4326)
-st_write(px, "data/processed/areas_pixel.geojson", delete_dsn = TRUE, quiet = TRUE)
+st_write(areas, "data/processed/areas.geojson", delete_dsn = TRUE, quiet = TRUE)
 
 print(table(pts$category))
 print(table(pts$category[pts$category == "Tram stop"], pts$in_ftz[pts$category == "Tram stop"]))
