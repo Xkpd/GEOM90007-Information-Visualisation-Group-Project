@@ -20,8 +20,8 @@
 # Areas are the 13 CLUE statistical areas, not official suburbs.
 #
 # Team hooks inside server(): sel_area(), sel_place(), rv$lv, rv$visits.
-# C: paste the published Tableau Public view into TABLEAU_URL below (and change
-# TABLEAU_FIELD if the area filter field is not called "Area").
+# C: the published Tableau Public view is in TABLEAU_URL below; TABLEAU_TWO_WAY links it
+# both ways (set it to FALSE for the plain one-way iframe).
 
 library(shiny)
 library(bslib)
@@ -292,9 +292,68 @@ intro_modal <- function() {
 }
 
 # ---- Tableau (Person C) -----------------------------------------------------------
-TABLEAU_URL <- ""  # e.g. "https://public.tableau.com/views/Workbook/Dashboard"
+TABLEAU_URL <- "https://public.tableau.com/views/MelLevel10Insights/Whentogo"
 if (!grepl("^https://public\\.tableau\\.com/views/[^?#\"'<> ]+$", TABLEAU_URL)) TABLEAU_URL <- ""
 TABLEAU_FIELD <- "Area"
+# Two-way link through the Tableau Embedding API v3:
+#   Shiny -> Tableau: selecting an area filters every sheet in the dashboard (no reload).
+#   Tableau -> Shiny: clicking a counter on the Tableau map selects its area in the app.
+# Set to FALSE to fall back to the plain one-way iframe.
+TABLEAU_TWO_WAY <- TRUE
+# Areas with pedestrian counts in the Tableau data (Oct 2025 - Oct 2026). The other four
+# areas have no counters, so the dashboard shows the whole city for them instead of a blank view.
+CROWD_AREAS <- c("Carlton", "Docklands", "Kensington", "Melbourne (CBD)", "Melbourne (Remainder)",
+                 "North Melbourne", "Parkville", "Southbank", "West Melbourne (Residential)")
+
+TABLEAU_JS <- "
+(function() {
+  var pending = {field: 'Area', value: null}, ready = false, filtered = false;
+  function viz() { return document.getElementById('tableau-viz'); }
+  // every worksheet in the embedded view (a dashboard holds several)
+  function sheets() {
+    var v = viz();
+    if (!v || !v.workbook) return [];
+    var s = v.workbook.activeSheet;
+    return s.sheetType === 'dashboard' ? s.worksheets : [s];
+  }
+  async function apply() {
+    var f = pending, list = sheets();
+    // clearing a filter that was never set makes Tableau report an error, so skip it
+    if (f.value === null && !filtered) return;
+    filtered = f.value !== null;
+    for (var i = 0; i < list.length; i++) {
+      try {
+        if (f.value === null) await list[i].clearFilterAsync(f.field);
+        else await list[i].applyFilterAsync(f.field, [f.value], 'replace');
+      } catch (e) { console.warn('Tableau filter skipped on ' + list[i].name + ': ' + e.message); }
+    }
+  }
+  // Shiny -> Tableau; kept until the dashboard is ready if it is still loading
+  Shiny.addCustomMessageHandler('tableau_filter', function(f) {
+    pending = {field: f.field, value: typeof f.value === 'string' ? f.value : null};
+    if (ready) apply();
+  });
+  // Tableau's events do not bubble, so listen in the capture phase on the whole page
+  document.addEventListener('firstinteractive', function(e) {
+    if (e.target && e.target.id === 'tableau-viz') { ready = true; apply(); }
+  }, true);
+  // Tableau -> Shiny: the first selected mark that carries an Area field
+  document.addEventListener('markselectionchanged', async function(e) {
+    if (!e.target || e.target.id !== 'tableau-viz') return;
+    try {
+      var marks = await e.detail.getMarksAsync();
+      for (var t = 0; t < marks.data.length; t++) {
+        var table = marks.data[t];
+        var col = table.columns.find(function(c) { return /^Area\\b/.test(c.fieldName); });
+        if (col && table.data.length) {
+          Shiny.setInputValue('tableau_area', table.data[0][col.index].value, {priority: 'event'});
+          return;
+        }
+      }
+    } catch (err) { console.warn('Tableau selection not read: ' + err.message); }
+  }, true);
+})();
+"
 
 # ---- UI -------------------------------------------------------------------------
 CSS <- "
@@ -456,6 +515,7 @@ kbd{font-size:.72rem;padding:1px 5px;border:1px solid var(--line);border-bottom-
   .kpi{padding:12px} .kpi .v{font-size:1.25rem}
 }
 .tableau-frame{width:100%;height:100%;min-height:620px;border:0;background:#fff;border-radius:var(--radius)}
+tableau-viz{display:block;width:100%;background:#fff;border-radius:var(--radius);overflow:hidden}
 "
 
 JS <- "
@@ -495,7 +555,10 @@ ui <- page_navbar(
   window_title = "Melbourne Level Up", id = "tab", fillable = c("Explore", "When to go"),
   theme = bs_theme(version = 5, primary = "#3182bd", "navbar-bg" = "#ffffff", "font-size-base" = "0.9rem",
                    base_font = font_collection("Inter", "system-ui", "-apple-system", "Segoe UI", "sans-serif")),
-  header = tags$head(tags$style(HTML(CSS)), tags$script(HTML(JS))),
+  header = tags$head(tags$style(HTML(CSS)), tags$script(HTML(JS)),
+    if (TABLEAU_TWO_WAY && nzchar(TABLEAU_URL)) tagList(
+      tags$script(type = "module", src = "https://public.tableau.com/javascripts/api/tableau.embedding.3.latest.min.js"),
+      tags$script(HTML(TABLEAU_JS)))),
   nav_panel("Explore",
     div(class = "explore",
       div(class = "mapcol",
@@ -517,7 +580,8 @@ ui <- page_navbar(
               span(tags$i(class = "nx"), "try next"),
               if (!is.null(ftz)) span(span(class = "dash"), "Free Tram Zone"))))),
       div(class = "panel", uiOutput("detail")))),
-  nav_panel("When to go", uiOutput("tableau")),
+  nav_panel("When to go", div(style = "display:flex;flex-direction:column;gap:8px;height:100%",
+    uiOutput("tableau_note"), uiOutput("tableau"))),
   nav_panel("My Melbourne",
     div(class = "mm-page",
       div(class = "mm",
@@ -885,18 +949,49 @@ server <- function(input, output, session) {
   })
 
   # ---- When to go (Tableau by Person C) ----
+  # only areas with pedestrian counters filter the dashboard; the rest show the whole city
+  crowd_area <- reactive({ a <- sel_area(); if (!is.null(a) && a %in% CROWD_AREAS) a else NULL })
+
+  output$tableau_note <- renderUI({
+    if (!nzchar(TABLEAU_URL)) return(NULL)
+    a <- sel_area()
+    msg <- if (is.null(a)) {
+      paste0("Showing all areas. Select an area on the Explore map",
+             if (TABLEAU_TWO_WAY) " or click a counter on the map below", " to focus this view.")
+    } else if (!a %in% CROWD_AREAS) {
+      paste0("There are no pedestrian counters in ", a, ", so this shows all areas.")
+    } else paste0("Filtered to ", a, ", your selected area.")
+    p(class = "sub", style = "margin:0", msg, if (!is.null(a)) tagList(" ", actionLink("tableau_all", "Show all areas")))
+  })
+
   output$tableau <- renderUI({
     if (!nzchar(TABLEAU_URL)) return(div(class = "pane", style = "max-width:720px;margin:24px auto",
       div(class = "eyebrow", "Crowd patterns"),
       p(class = "empty", "The Tableau view is not connected yet. Paste the published Tableau Public link into TABLEAU_URL in app.R and restart the app.")))
-    a <- sel_area()
+    # two-way: draw the dashboard once; area changes are sent as filters below, so it never reloads
+    if (TABLEAU_TWO_WAY) return(tag("tableau-viz", list(id = "tableau-viz", src = TABLEAU_URL, toolbar = "bottom",
+      `hide-tabs` = NA, width = "100%", height = "720px")))
+    # one-way fallback: reload the iframe with the area in the URL
+    a <- crowd_area()
     src <- paste0(TABLEAU_URL, "?:showVizHome=no&:embed=true&:toolbar=bottom",
                   if (!is.null(a)) paste0("&", URLencode(TABLEAU_FIELD, reserved = TRUE), "=", URLencode(a, reserved = TRUE)))
-    div(style = "display:flex;flex-direction:column;gap:8px;height:100%",
-      p(class = "sub", style = "margin:0", if (is.null(a)) "Showing all areas. Select an area on the Explore map to focus this view."
-                                        else paste0("Filtered to ", a, ", your selected area on the Explore map.")),
-      tags$iframe(class = "tableau-frame", src = src, title = "Tableau view: pedestrian activity by day and hour"))
+    tags$iframe(class = "tableau-frame", src = src, title = "Tableau view: pedestrian activity by day and hour")
   })
+
+  # Shiny -> Tableau
+  observe({
+    req(TABLEAU_TWO_WAY, nzchar(TABLEAU_URL))
+    a <- crowd_area()
+    session$sendCustomMessage("tableau_filter", list(field = TABLEAU_FIELD, value = if (is.null(a)) NA else a))
+  })
+  # Tableau -> Shiny: a counter clicked in the dashboard selects its area in the app
+  observeEvent(input$tableau_area, {
+    a <- input$tableau_area
+    req(isTRUE(a %in% AREAS))
+    select_area(a)
+    showNotification(paste0(a, " selected. It is also highlighted on the Explore map."), duration = 3)
+  })
+  observeEvent(input$tableau_all, { sel_place(NULL); sel_area(NULL); leafletProxy("map") |> clearPopups() })
 
   # ---- My Melbourne ----
   # what the map says: strongest pattern, home turf, blind spots and where to go next
