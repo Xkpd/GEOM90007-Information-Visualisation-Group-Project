@@ -515,7 +515,8 @@ kbd{font-size:.72rem;padding:1px 5px;border:1px solid var(--line);border-bottom-
   .kpi{padding:12px} .kpi .v{font-size:1.25rem}
 }
 .tableau-frame{width:100%;height:100%;min-height:620px;border:0;background:#fff;border-radius:var(--radius)}
-tableau-viz{display:block;width:100%;background:#fff;border-radius:var(--radius);overflow:hidden}
+/* keep the dashboard its full height inside the scroll area instead of being squashed */
+.when-scroll>*{flex:none} tableau-viz{display:block;flex:none;min-height:720px;width:100%;background:#fff;border-radius:var(--radius);overflow:hidden}
 "
 
 JS <- "
@@ -542,6 +543,11 @@ document.addEventListener('keydown', function(e) {
   if (e.ctrlKey || e.metaKey || e.altKey || /input|textarea|select/i.test(e.target.tagName) || e.target.isContentEditable) return;
   if (/^[0-5]$/.test(e.key)) Shiny.setInputValue('key_lv', +e.key, {priority: 'event'});
   if (e.key === 'Escape') Shiny.setInputValue('esc', Date.now(), {priority: 'event'});
+});
+$(document).on('shown.bs.tab', function() {
+  window.scrollTo(0, 0);
+  var w = window.HTMLWidgets && HTMLWidgets.find('#map');
+  if (w && w.getMap()) setTimeout(function() { w.getMap().invalidateSize(); }, 60);
 });
 function pick(kind, value) { Shiny.setInputValue('pick', {kind: kind, value: value}, {priority: 'event'}); }
 "
@@ -580,7 +586,8 @@ ui <- page_navbar(
               span(tags$i(class = "nx"), "try next"),
               if (!is.null(ftz)) span(span(class = "dash"), "Free Tram Zone"))))),
       div(class = "panel", uiOutput("detail")))),
-  nav_panel("When to go", div(style = "display:flex;flex-direction:column;gap:8px;height:100%",
+  # the page is pinned to the window, so the dashboard scrolls inside its own area
+  nav_panel("When to go", div(class = "when-scroll", style = "display:flex;flex-direction:column;gap:8px;height:100%;overflow-y:auto;min-height:0;padding-bottom:12px",
     uiOutput("tableau_note"), uiOutput("tableau"))),
   nav_panel("My Melbourne",
     div(class = "mm-page",
@@ -739,19 +746,22 @@ server <- function(input, output, session) {
     }
   }
   select_area <- function(a, zoom = FALSE, popup_at = NULL) {
+    force(zoom)  # callers may compare with sel_area(), so read it before it changes
     sel_area(a)
     sel_place(NULL)
     m <- leafletProxy("map") |> clearPopups()
+    # open the picker first: a popup opened mid-flight cancels the zoom animation
     if (!is.null(popup_at)) addPopups(m, popup_at$lng, popup_at$lat, level_popup(a, rv$lv[[a]]), layerId = "lvpop",
-                                      options = popupOptions(className = "lv-popup", autoPanPadding = c(40, 40)))
+                                      options = popupOptions(className = "lv-popup", autoPan = !zoom, autoPanPadding = c(40, 40)))
     if (zoom) {
       b <- unname(st_bbox(areas[areas$area == a, ]))
-      flyToBounds(m, b[1], b[2], b[3], b[4], options = list(padding = c(30, 30)))
+      flyToBounds(m, b[1], b[2], b[3], b[4], options = list(padding = c(30, 30), duration = 0.6))
     }
   }
   observeEvent(input$map_shape_click, {
     e <- input$map_shape_click
-    if (isTRUE(e$id %in% AREAS)) select_area(e$id, popup_at = e)
+    # a new area zooms in; clicking the area you are already in only reopens the picker
+    if (isTRUE(e$id %in% AREAS)) select_area(e$id, zoom = !identical(sel_area(), e$id), popup_at = e)
   })
   observeEvent(input$map_marker_click, { k <- input$map_marker_click$id; if (isTRUE(k %in% places$key)) select_place(k) })
   observeEvent(input$search, {
