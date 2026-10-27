@@ -216,9 +216,10 @@ CLUSTER_ICON <- JS(sprintf("function(cl) {
 }", toJSON(unname(CATS))))
 
 # hollow = not visited, filled = checked in
-draw_places <- function(map, cats, visited) {
+draw_places <- function(map, cats, visited, area = NULL) {
   map <- clearGroup(map, "places")
-  d <- places[places$category %in% cats, ]
+  # with an area selected, show only its places so the map stays focused on it
+  d <- places[places$category %in% cats & (is.null(area) | places$area %in% area), ]
   if (!nrow(d)) return(map)
   v <- d$key %in% visited
   col <- unname(CATS[d$category])
@@ -230,16 +231,6 @@ draw_places <- function(map, cats, visited) {
       # wider merging at city scale keeps bubbles apart; tighter once on the street
       maxClusterRadius = JS("function(z) { return z <= 13 ? 65 : z <= 14 ? 55 : 45; }"),
       showCoverageOnHover = FALSE, spiderfyOnMaxZoom = FALSE, iconCreateFunction = CLUSTER_ICON))
-}
-
-# JapanEx-style quick picker shown where the user clicked an area
-level_popup <- function(a, current) {
-  btns <- vapply(5:0, \(l) sprintf(
-    "<button type='button' class='pop-lv%s' style='background:%s;color:%s' onclick='Shiny.setInputValue(\"set_lv\", {area: %s, lv: %d}, {priority: \"event\"})'>Lv %d <span>%s</span></button>",
-    if (l == current) " current" else "", LEVELS$col[l + 1], LEVELS$ink[l + 1],
-    htmltools::htmlEscape(toJSON(a, auto_unbox = TRUE), attribute = TRUE), l, l, LEVELS$label[l + 1]), "")
-  sprintf("<div class='pop'><div class='pop-title'>%s</div><div class='pop-q'>How well do you know it?</div>%s</div>",
-          htmltools::htmlEscape(a), paste(btns, collapse = ""))
 }
 
 # Shareable postcard of the player's map (the JapanEx "Save IMG" idea)
@@ -283,7 +274,7 @@ intro_modal <- function() {
       div(class = "intro-sub", "Map how well you know the City of Melbourne, then find where to go next."),
       div(class = "intro-grid",
         step(1, div(class = "ramp intro-ramp", lapply(1:6, \(i) span(style = paste0("background:", LEVELS$col[i])))),
-             "Rate an area", "Click it on the map: Lv 0 never been → Lv 5 lived there."),
+             "Rate an area", "Click it on the map, then pick Lv 0 never been → Lv 5 lived there on the right."),
         step(2, div(style = "font-size:1.4rem;letter-spacing:6px", dot("Landmark", hollow = TRUE), "→", dot("Landmark")),
              "Check in", "Click a place you visited. Hollow → filled."),
         step(3, div(class = "intro-hm", lapply(c(0.15, 0.85, 0.35, 0.6), \(a) span(style = sprintf("background:%s%02X", CATS[["Park"]], as.integer(255 * a))))),
@@ -317,14 +308,16 @@ TABLEAU_JS <- "
     return s.sheetType === 'dashboard' ? s.worksheets : [s];
   }
   async function apply() {
-    var f = pending, list = sheets();
-    // clearing a filter that was never set makes Tableau report an error, so skip it
-    if (f.value === null && !filtered) return;
+    var f = pending, list = sheets(), wasFiltered = filtered;
     filtered = f.value !== null;
     for (var i = 0; i < list.length; i++) {
       try {
-        if (f.value === null) await list[i].clearFilterAsync(f.field);
-        else await list[i].applyFilterAsync(f.field, [f.value], 'replace');
+        if (f.value === null) {
+          // a clicked counter also acts as a filter in the dashboard, so 'all areas' clears it too
+          await list[i].clearSelectedMarksAsync();
+          // clearing a filter that was never set makes Tableau report an error, so skip it
+          if (wasFiltered) await list[i].clearFilterAsync(f.field);
+        } else await list[i].applyFilterAsync(f.field, [f.value], 'replace');
       } catch (e) { console.warn('Tableau filter skipped on ' + list[i].name + ': ' + e.message); }
     }
   }
@@ -335,8 +328,31 @@ TABLEAU_JS <- "
   });
   // Tableau's events do not bubble, so listen in the capture phase on the whole page
   document.addEventListener('firstinteractive', function(e) {
-    if (e.target && e.target.id === 'tableau-viz') { ready = true; apply(); }
+    if (e.target && e.target.id === 'tableau-viz') {
+      ready = true; apply();
+    }
   }, true);
+  // Tableau -> Shiny: the dashboard's Area filter list. One area selects it in the app;
+  // (All) clears the selection; several at once is ambiguous, so it is left alone
+  // (Tableau only delivers this event to listeners on the dashboard element itself)
+  // A change only counts as the user's choice when it differs from what the app last set,
+  // so the app's own filtering never echoes back (no timing assumptions)
+  async function onFilter(e) {
+    try {
+      var f = await e.detail.getFilterAsync();
+      if (!/^Area\\b/.test(f.fieldName)) return;
+      if (f.isAllSelected) {
+        if (pending.value !== null) Shiny.setInputValue('tableau_area_all', Date.now(), {priority: 'event'});
+        return;
+      }
+      var vals = (f.appliedValues || []).map(function(v) { return v.value; });
+      if (vals.length === 1 && vals[0] !== pending.value) Shiny.setInputValue('tableau_area', vals[0], {priority: 'event'});
+    } catch (err) { console.warn('Tableau filter not read: ' + err.message); }
+  }
+  // Tableau's documented pattern: attach listeners when the <tableau-viz> element is created,
+  // before it loads. Shiny adds the element later, so watch the page for it.
+  function hook(el) { if (el && !el._melFilterHook) { el._melFilterHook = true; el.addEventListener('filterchanged', onFilter); } }
+  new MutationObserver(function() { hook(viz()); }).observe(document.documentElement, {childList: true, subtree: true});
   // Tableau -> Shiny: the first selected mark that carries an Area field
   document.addEventListener('markselectionchanged', async function(e) {
     if (!e.target || e.target.id !== 'tableau-viz') return;
@@ -377,12 +393,15 @@ body{background:var(--bg);color:var(--ink)}
 .intro-h{font-weight:700} .intro-b{color:var(--muted);font-size:.84rem;margin-top:2px}
 .hm-colh{display:flex;flex-direction:column;align-items:center;gap:1px;font-size:.6rem;font-weight:600;color:var(--muted)}
 .save-status{font-size:.78rem;color:var(--muted);white-space:nowrap} .save-status.warn{color:#b45309;font-weight:600}
-.explore{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:14px;height:100%;min-height:540px}
+/* toolbar spans both columns; map and side panel share the same top and bottom edge */
+.explore{display:grid;grid-template-columns:minmax(0,1fr) 360px;grid-template-rows:auto minmax(0,1fr);gap:10px 14px;height:100%;min-height:540px}
+.mapcol{display:contents} .toolbar{grid-column:1/-1;grid-row:1} .mapwrap{grid-column:1;grid-row:2} .panel{grid-column:2;grid-row:2}
+#detail{flex:1 0 auto;display:flex;flex-direction:column;gap:12px}
+.pane.overview{flex:1 0 auto;display:flex;flex-direction:column}
+.pane.overview .hm{flex:1;justify-content:space-between}
 .mapwrap{position:relative;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;min-height:0;background:#e9edf2}
 .overlay{position:absolute;z-index:1000;background:rgba(255,255,255,.96);border:1px solid var(--line);border-radius:var(--radius);
   box-shadow:0 2px 10px rgba(29,43,83,.10)}
-.mapcol{display:flex;flex-direction:column;gap:10px;min-height:0;min-width:0}
-.mapcol .mapwrap{flex:1}
 .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .tb-search{flex:0 1 300px;min-width:220px} .tb-search .form-group{margin:0}
 .tb-search .selectize-input{border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:.92rem;box-shadow:none}
@@ -415,10 +434,20 @@ body{background:var(--bg);color:var(--ink)}
 .x{background:none;border:0;color:var(--muted);font-size:1.1rem;line-height:1;padding:2px 4px;cursor:pointer}
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
 .chip{font-size:.78rem;padding:3px 9px;border-radius:12px;background:#eef2f7;font-weight:600}
-.seg{display:grid;grid-template-columns:repeat(6,1fr);gap:4px;margin-top:12px}
-.seg button{height:30px;border:1px solid #9aa4b5;border-radius:5px;font-weight:700;font-size:.82rem;cursor:pointer}
-.seg button.current{outline:2px solid var(--ink);outline-offset:1px}
+/* the level picker is a staircase: each step is taller, steps you have reached are filled */
+.seg{display:grid;grid-template-columns:repeat(6,1fr);gap:4px;margin-top:12px;align-items:end;height:64px}
+.seg button{border:1.5px solid #9aa4b5;border-radius:5px 5px 2px 2px;font-weight:800;font-size:.8rem;cursor:pointer;
+  display:flex;align-items:flex-end;justify-content:center;padding-bottom:4px;transition:transform .12s, background .2s}
+.seg button:hover{transform:translateY(-3px)}
+/* steps not reached yet still show their colour, faintly, as a preview of what is next */
+.seg button.todo{opacity:.38;border-style:dashed} .seg button.todo:hover{opacity:.8}
+.seg button.current{outline:2px solid var(--ink);outline-offset:2px}
 .seg button:focus-visible{outline:3px solid #fdb515;outline-offset:1px}
+.seg-q{margin-top:12px;font-size:.8rem;color:var(--muted)} .seg-q+.seg{margin-top:6px}
+.score b.bump{display:inline-block;animation:bump .6s ease-out}
+@keyframes bump{0%{transform:scale(1)}30%{transform:scale(1.45);color:#e08e0b}100%{transform:scale(1)}}
+.seg.flash{animation:segflash 1s ease-out}
+@keyframes segflash{0%{box-shadow:0 0 0 0 rgba(49,130,189,.55);border-radius:8px}100%{box-shadow:0 0 0 10px rgba(49,130,189,0);border-radius:8px}}
 .seg-label{margin-top:8px;font-size:.86rem} .seg-label b{font-weight:700}
 .hint{color:var(--muted);font-size:.78rem;margin-top:4px}
 kbd{font-size:.72rem;padding:1px 5px;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;background:#fff;color:var(--ink)}
@@ -466,11 +495,6 @@ kbd{font-size:.72rem;padding:1px 5px;border:1px solid var(--line);border-bottom-
 .area-label.next{color:#9a5b00}
 .street-zoom .leaflet-labels-pane{display:none}
 .leaflet-container:not(.street-zoom) .leaflet-streets-pane{display:none}
-.lv-popup .leaflet-popup-content{margin:12px 12px 10px;width:210px!important}
-.pop-title{font-weight:750;font-size:.98rem;color:var(--ink)} .pop-q{color:var(--muted);font-size:.8rem;margin-bottom:8px}
-.pop-lv{display:flex;justify-content:space-between;align-items:center;width:100%;border:1px solid #9aa4b5;border-radius:5px;
-  padding:5px 9px;margin-bottom:4px;font-weight:700;font-size:.82rem;cursor:pointer}
-.pop-lv span{font-weight:500} .pop-lv.current{outline:2px solid var(--ink);outline-offset:1px}
 #shiny-notification-panel{right:auto;left:50%;transform:translateX(-50%);bottom:14px;width:300px}
 .shiny-notification{border-radius:8px;font-size:.82rem;padding:8px 12px;border:1px solid var(--line);box-shadow:0 4px 16px rgba(29,43,83,.18);opacity:1}
 /* My Melbourne page */
@@ -497,14 +521,21 @@ kbd{font-size:.72rem;padding:1px 5px;border:1px solid var(--line);border-bottom-
 .postcard img{width:100%;height:auto;border-radius:6px}
 .hist{width:100%;font-size:.86rem;border-collapse:collapse}
 .hist th{color:var(--muted);font-weight:600;text-align:left;border-bottom:1px solid var(--line);padding:6px 6px 6px 0}
-.hist td{padding:7px 6px 7px 0;border-bottom:1px solid #f0f2f6}
+.hist td{padding:7px 6px 7px 0;border-bottom:1px solid #f0f2f6;white-space:nowrap}
+.hist td:nth-child(2){max-width:0;width:55%;padding-right:14px}
+.hist td:nth-child(2) .linkbtn{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .hist-wrap{overflow-x:auto}
 .btn-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .save-tools .form-group{margin:12px 0 0} .save-tools .shiny-file-input-progress{margin:0;height:0} .save-tools .shiny-input-container{width:100%}
 .profile-note{font-size:.86rem;margin:10px 0 0;color:var(--ink)}
 /* wide screens: taller heatmap rows fill the side column instead of leaving a gap */
+/* short laptop screens: tighter heatmap rows so the panel ends with the map */
+@media (max-height:720px){
+  .hm{gap:1px} .hm-row{padding:1px 4px} .hm-cell,.hm-lv{height:14px} .pane.overview{padding:12px 14px}
+  .pane.overview .mix{margin:6px 0 4px} .pane.overview .hm-key{margin-top:4px} .pane.overview .howto{margin-top:2px}
+}
 @media (min-width:1241px) and (min-height:760px){
-  .hm{gap:4px} .hm-cell,.hm-lv{height:24px} .hm-row{grid-template-columns:minmax(0,1fr) 28px repeat(4,34px);gap:3px;font-size:.86rem}
+  .hm{gap:4px} .hm-cell,.hm-lv{height:24px} .hm-row{grid-template-columns:minmax(0,1fr) 26px repeat(4,30px);gap:3px;font-size:.86rem}
   .hm-name{font-size:.86rem}
 }
 @media (max-width:1240px){
@@ -544,10 +575,28 @@ document.addEventListener('keydown', function(e) {
   if (/^[0-5]$/.test(e.key)) Shiny.setInputValue('key_lv', +e.key, {priority: 'event'});
   if (e.key === 'Escape') Shiny.setInputValue('esc', Date.now(), {priority: 'event'});
 });
-$(document).on('shown.bs.tab', function() {
+$(document).on('shown.bs.tab', function(e) {
   window.scrollTo(0, 0);
   var w = window.HTMLWidgets && HTMLWidgets.find('#map');
-  if (w && w.getMap()) setTimeout(function() { w.getMap().invalidateSize(); }, 60);
+  if (w && w.getMap()) setTimeout(function() {
+    w.getMap().invalidateSize();
+    // tells the server the map now has its real size, so a queued zoom can run
+    if ($(e.target).attr('data-value') === 'Explore') Shiny.setInputValue('explore_shown', Date.now(), {priority: 'event'});
+  }, 60);
+});
+// a level-up makes the header score jump
+Shiny.addCustomMessageHandler('level_up', function(x) {
+  var el = document.querySelector('.score b');
+  if (!el) return;
+  el.classList.remove('bump'); void el.offsetWidth; el.classList.add('bump');
+});
+// after an area is chosen on the map, pulse the panel's level buttons once
+Shiny.addCustomMessageHandler('flash_levels', function(x) {
+  setTimeout(function() {
+    var seg = document.querySelector('#detail .seg');
+    if (!seg) return;
+    seg.classList.remove('flash'); void seg.offsetWidth; seg.classList.add('flash');
+  }, 150);
 });
 function pick(kind, value) { Shiny.setInputValue('pick', {kind: kind, value: value}, {priority: 'event'}); }
 "
@@ -726,7 +775,7 @@ server <- function(input, output, session) {
   })
   observe({
     req(ready())
-    leafletProxy("map") |> draw_places(input$cats %||% character(), rv$visits$key)
+    leafletProxy("map") |> draw_places(input$cats %||% character(), rv$visits$key, sel_area())
   })
   observe({
     req(ready())
@@ -745,23 +794,23 @@ server <- function(input, output, session) {
       leafletProxy("map") |> setView(places[k, "lon"], places[k, "lat"], 17)
     }
   }
-  select_area <- function(a, zoom = FALSE, popup_at = NULL) {
+  # Rating happens only in the side panel. A picker floating on the map depends on where
+  # the click landed, the zoom and the window size, so it could always end up off-screen;
+  # the panel is in the same place every time.
+  select_area <- function(a, zoom = FALSE) {
     force(zoom)  # callers may compare with sel_area(), so read it before it changes
     sel_area(a)
     sel_place(NULL)
-    m <- leafletProxy("map") |> clearPopups()
-    # open the picker first: a popup opened mid-flight cancels the zoom animation
-    if (!is.null(popup_at)) addPopups(m, popup_at$lng, popup_at$lat, level_popup(a, rv$lv[[a]]), layerId = "lvpop",
-                                      options = popupOptions(className = "lv-popup", autoPan = !zoom, autoPanPadding = c(40, 40)))
     if (zoom) {
       b <- unname(st_bbox(areas[areas$area == a, ]))
-      flyToBounds(m, b[1], b[2], b[3], b[4], options = list(padding = c(30, 30), duration = 0.6))
+      leafletProxy("map") |> flyToBounds(b[1], b[2], b[3], b[4], options = list(padding = c(30, 30), duration = 0.6))
     }
+    session$sendCustomMessage("flash_levels", TRUE)
   }
   observeEvent(input$map_shape_click, {
     e <- input$map_shape_click
-    # a new area zooms in; clicking the area you are already in only reopens the picker
-    if (isTRUE(e$id %in% AREAS)) select_area(e$id, zoom = !identical(sel_area(), e$id), popup_at = e)
+    # a new area is framed on the map; re-clicking the current one keeps your zoom
+    if (isTRUE(e$id %in% AREAS)) select_area(e$id, zoom = !identical(sel_area(), e$id))
   })
   observeEvent(input$map_marker_click, { k <- input$map_marker_click$id; if (isTRUE(k %in% places$key)) select_place(k) })
   observeEvent(input$search, {
@@ -772,10 +821,24 @@ server <- function(input, output, session) {
     if (startsWith(s, "place:") && v %in% places$key) select_place(v, zoom = TRUE)
     updateSelectizeInput(session, "search", selected = "")  # the box is for finding, not a lasting filter
   }, ignoreInit = TRUE)
+  # a hidden map has no size, so zooming to an area from another tab would land on the
+  # maximum zoom; picks from other tabs wait until Explore is showing and resized
+  pending_pick <- reactiveVal(NULL)
+  do_pick <- function(p) {
+    v <- p$value
+    if (identical(p$kind, "area") && isTRUE(v %in% AREAS)) select_area(v, zoom = TRUE)
+    if (identical(p$kind, "place") && isTRUE(v %in% places$key)) select_place(v, zoom = TRUE)
+  }
   observeEvent(input$pick, {
-    v <- input$pick$value
-    if (identical(input$pick$kind, "area") && isTRUE(v %in% AREAS)) { nav_select("tab", "Explore"); select_area(v, zoom = TRUE) }
-    if (identical(input$pick$kind, "place") && isTRUE(v %in% places$key)) { nav_select("tab", "Explore"); select_place(v, zoom = TRUE) }
+    if (identical(input$tab, "Explore")) return(do_pick(input$pick))
+    pending_pick(input$pick)
+    nav_select("tab", "Explore")
+  })
+  observeEvent(input$explore_shown, {
+    p <- pending_pick()
+    req(p)
+    pending_pick(NULL)
+    do_pick(p)
   })
   observeEvent(input$esc, { sel_place(NULL); sel_area(NULL); leafletProxy("map") |> clearPopups() })
   observeEvent(input$close_place, sel_place(NULL))
@@ -787,9 +850,14 @@ server <- function(input, output, session) {
     leafletProxy("map") |> clearPopups()
     sel_area(a)
     if (rv$lv[[a]] == l) return()
+    up <- l > rv$lv[[a]]
     lv <- rv$lv
     lv[[a]] <- as.integer(l)
     change(lv = lv)
+    if (up) {
+      showNotification(sprintf("▲ Level up! %s is now Lv %d · %s", a, l, LEVELS$label[l + 1]), duration = 3)
+      session$sendCustomMessage("level_up", TRUE)
+    }
   }
   observeEvent(input$set_lv, set_level(input$set_lv$area, input$set_lv$lv))
   observeEvent(input$key_lv, {
@@ -900,10 +968,11 @@ server <- function(input, output, session) {
           actionButton("close_area", "✕", class = "x", title = "Close", `aria-label` = "Close area details")),
       if (length(kf)) div(class = "chips", lapply(kf, \(c) span(class = "chip", style = sprintf("border-left:4px solid %s", CATS[[c]]),
         title = sprintf("%.1f times the city-wide share of %s", LQ[a, c], PLURAL[[c]]), sprintf("▲ %.1f× %s", LQ[a, c], PLURAL[[c]])))),
+      div(class = "seg-q", "How well do you know it?"),
       div(class = "seg", role = "radiogroup", `aria-label` = "Your level for this area", title = "Shortcut: keys 0–5 rate, Esc closes",
         lapply(0:5, \(i) tags$button(type = "button", role = "radio", `aria-checked` = tolower(i == l),
-          class = if (i == l) "current", title = sprintf("%s: %s", LEVELS$label[i + 1], LEVELS$hint[i + 1]),
-          style = sprintf("background:%s;color:%s", LEVELS$col[i + 1], LEVELS$ink[i + 1]),
+          class = paste(if (i == l) "current", if (i > l) "todo"), title = sprintf("%s: %s", LEVELS$label[i + 1], LEVELS$hint[i + 1]),
+          style = sprintf("height:%dpx;background:%s;color:%s", 24 + 8 * i, LEVELS$col[i + 1], LEVELS$ink[i + 1]),
           onclick = sprintf("Shiny.setInputValue('set_lv', %s, {priority: 'event'})", toJSON(list(area = a, lv = i), auto_unbox = TRUE)),
           i))),
       div(class = "seg-label", tags$b(sprintf("Lv %d · %s", l, LEVELS$label[l + 1]))),
@@ -931,7 +1000,7 @@ server <- function(input, output, session) {
     lv <- rv$lv
     nxt <- frontier_areas()
     # one card answers "how far am I, what is each area like, and where next?"
-    div(class = "pane",
+    div(class = "pane overview",
       div(class = "head", div(class = "eyebrow", "Your Melbourne"), span(class = "eyebrow-n", sprintf("%d / %d rated", sum(lv > 0), length(AREAS)))),
       div(class = "mix", lapply(5:0, \(l) if (sum(lv == l)) span(style = sprintf("flex:%d;background:%s", sum(lv == l), LEVELS$col[l + 1]),
                                                                  title = sprintf("%s: %d", LEVELS$label[l + 1], sum(lv == l))))),
@@ -971,7 +1040,8 @@ server <- function(input, output, session) {
     } else if (!a %in% CROWD_AREAS) {
       paste0("There are no pedestrian counters in ", a, ", so this shows all areas.")
     } else paste0("Filtered to ", a, ", your selected area.")
-    p(class = "sub", style = "margin:0", msg, if (!is.null(a)) tagList(" ", actionLink("tableau_all", "Show all areas")))
+    # the link only appears when there is a filter to undo
+    p(class = "sub", style = "margin:0", msg, if (!is.null(a) && a %in% CROWD_AREAS) tagList(" ", actionLink("tableau_all", "Show all areas")))
   })
 
   output$tableau <- renderUI({
@@ -998,9 +1068,12 @@ server <- function(input, output, session) {
   observeEvent(input$tableau_area, {
     a <- input$tableau_area
     req(isTRUE(a %in% AREAS))
+    if (identical(sel_area(), a)) return()
     select_area(a)
-    showNotification(paste0(a, " selected. It is also highlighted on the Explore map."), duration = 3)
+    pending_pick(list(kind = "area", value = a))  # framed on the map when Explore opens
+    showNotification(paste0(a, " selected. Explore will show it on the map."), duration = 3)
   })
+  observeEvent(input$tableau_area_all, { sel_place(NULL); sel_area(NULL); pending_pick(NULL) })
   observeEvent(input$tableau_all, { sel_place(NULL); sel_area(NULL); leafletProxy("map") |> clearPopups() })
 
   # ---- My Melbourne ----
@@ -1013,11 +1086,13 @@ server <- function(input, output, session) {
       tags$button(type = "button", class = "btn btn-sm btn-primary", onclick = pick_js("area", frontier(lv)$area[1]),
                   paste("Start with", frontier(lv)$area[1], "→"))))
     v <- places[rv$visits$key, ]
-    mine <- prop.table(table(factor(v$category, names(CATS))))
+    # counts are always defined; shares are not when there are no check-ins yet
+    counts <- table(factor(v$category, names(CATS)))
+    mine <- if (sum(counts)) prop.table(counts) else counts
     city <- prop.table(CAT_TOTALS)
-    n_sights <- sum(v$category %in% SIGHTS)
+    n_sights <- sum(counts[SIGHTS])
     top <- if (n_sights >= 3) SIGHTS[which.max(mine[SIGHTS] / city[SIGHTS])] else NULL
-    gap <- if (any(lv > 0)) SIGHTS[mine[SIGHTS] == 0 & colSums(AREA_CATS[AREAS[lv > 0], SIGHTS, drop = FALSE]) > 0] else character()
+    gap <- if (any(lv > 0)) SIGHTS[counts[SIGHTS] == 0 & colSums(AREA_CATS[AREAS[lv > 0], SIGHTS, drop = FALSE]) > 0] else character()
     home <- AREAS[lv == max(lv) & lv > 0]
     nxt <- frontier(lv)
     row <- function(label, ...) div(class = "ins-row", span(class = "ins-l", label), div(class = "ins-v", ...))
@@ -1077,7 +1152,7 @@ server <- function(input, output, session) {
         p_row <- places[v$key[i], ]
         tags$tr(tags$td(style = "white-space:nowrap", nice_date(v$date[i])),
           tags$td(tags$button(type = "button", class = "linkbtn", style = "color:var(--ink);text-align:left", onclick = pick_js("place", v$key[i]),
-                              dot(p_row$category), p_row$label)),
+                              title = p_row$label, dot(p_row$category), p_row$label)),
           tags$td(p_row$area),
           tags$td(style = "text-align:right", tags$button(type = "button", class = "linkbtn", `aria-label` = paste("Remove check-in at", p_row$label),
             onclick = sprintf("Shiny.setInputValue('remove_visit', %s, {priority:'event'})", toJSON(v$key[i], auto_unbox = TRUE)), "Remove")))
