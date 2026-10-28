@@ -15,8 +15,8 @@
 # readability and made the map harder to scan.
 #
 # Data (data/ next to this file): the team's enriched places.csv (name, category, sub, lat,
-# lon, area, in_ftz, rare), areas.geojson and ftz.geojson, copied from branch
-# style/noirj0e. When A updates the prepared data, copy the new files into data/.
+# lon, area, in_ftz, rare), areas.geojson and ftz.geojson, written by R/prep_places.R
+# at the repo root (run it from there to refresh the data).
 # Areas are the 13 CLUE statistical areas, not official suburbs.
 #
 # Team hooks inside server(): sel_area(), sel_place(), rv$lv, rv$visits.
