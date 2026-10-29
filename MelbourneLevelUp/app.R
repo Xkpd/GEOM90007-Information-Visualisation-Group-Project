@@ -5,6 +5,9 @@
 # Packages: shiny, bslib, leaflet, sf, jsonlite, ggplot2, htmlwidgets
 # (install them separately; this script never installs anything).
 #
+# AI use: parts of this code and of the data preparation script (R/prep_places.R) were
+# written with Claude (Anthropic). Design decisions and review by the team; see the report.
+#
 # Idea (after JapanEx, zhung.com.tw/japanex): colour each City of Melbourne area by how
 # well you know it (Lv 0-5), check in at places, and watch your MEL Level grow.
 # Beyond the game, the app turns open data into next steps for a visitor:
